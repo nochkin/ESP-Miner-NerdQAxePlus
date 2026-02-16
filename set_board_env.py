@@ -11,6 +11,7 @@ current_env = env["PIOENV"]
 # Map environment names to BOARD values
 board_mapping = {
     "nerdqaxeplus2": "NERDQAXEPLUS2",
+    "nerdqaxeplus2_35screen": "NERDQAXEPLUS2",
     "nerdqaxeplus": "NERDQAXEPLUS",
     "nerdoctaxeplus": "NERDOCTAXEPLUS",
     "nerdoctaxegamma": "NERDOCTAXEGAMMA",
