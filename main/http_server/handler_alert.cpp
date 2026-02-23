@@ -13,6 +13,9 @@ static const char* TAG = "http_alert";
 
 esp_err_t GET_alert_info(httpd_req_t *req)
 {
+    // close connection when out of scope
+    ConGuard g(http_server, req);
+
     if (is_network_allowed(req) != ESP_OK) {
         return httpd_resp_send_err(req, HTTPD_401_UNAUTHORIZED, "Unauthorized");
     }
@@ -33,6 +36,8 @@ esp_err_t GET_alert_info(httpd_req_t *req)
     //doc["alertDiscordWebhook"]  = alertDiscordWebhook;
     doc["alertDiscordWatchdogEnable"] = Config::isDiscordWatchdogAlertEnabled() ? 1 : 0;
     doc["alertDiscordBlockFoundEnable"] = Config::isDiscordBlockFoundAlertEnabled() ? 1 : 0;
+    doc["alertDiscordBestDiffEnable"] = Config::isDiscordBestDiffAlertEnabled() ? 1 : 0;
+    doc["showBlockFoundScreenEnable"] = Config::isShowBlockFoundEnabled() ? 1 : 0;
 
     esp_err_t ret = sendJsonResponse(req, doc);
 
@@ -45,6 +50,9 @@ esp_err_t GET_alert_info(httpd_req_t *req)
 
 esp_err_t POST_update_alert(httpd_req_t *req)
 {
+    // close connection when out of scope
+    ConGuard g(http_server, req);
+
     if (is_network_allowed(req) != ESP_OK) {
         return httpd_resp_send_err(req, HTTPD_401_UNAUTHORIZED, "Unauthorized");
     }
@@ -54,34 +62,16 @@ esp_err_t POST_update_alert(httpd_req_t *req)
         return ESP_FAIL;
     }
 
-    int total_len = req->content_len;
-    int cur_len = 0;
-    char *buf = ((rest_server_context_t *)(req->user_ctx))->scratch;
-    int received = 0;
-
-    if (total_len >= SCRATCH_BUFSIZE) {
-        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Content too long");
+    if (validateOTP(req) != ESP_OK) {
         return ESP_FAIL;
     }
-
-    while (cur_len < total_len) {
-        received = httpd_req_recv(req, buf + cur_len, total_len);
-        if (received <= 0) {
-            httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Failed to receive body");
-            return ESP_FAIL;
-        }
-        cur_len += received;
-    }
-    buf[total_len] = '\0';
 
     PSRAMAllocator allocator;
     JsonDocument doc(&allocator);
 
-    DeserializationError error = deserializeJson(doc, buf);
-    if (error) {
-        ESP_LOGE(TAG, "JSON parsing failed: %s", error.c_str());
-        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Invalid JSON");
-        return ESP_FAIL;
+    esp_err_t err = getJsonData(req, doc);
+    if (err != ESP_OK) {
+        return err;
     }
 
     if (doc["alertDiscordWebhook"].is<const char*>()) {
@@ -93,7 +83,12 @@ esp_err_t POST_update_alert(httpd_req_t *req)
     if (doc["alertDiscordBlockFoundEnable"].is<bool>()) {
         Config::setDiscordAlertBlockFoundEnabled(doc["alertDiscordBlockFoundEnable"].as<bool>());
     }
-
+    if (doc["alertDiscordBestDiffEnable"].is<bool>()) {
+        Config::setDiscordAlertBestDiffEnabled(doc["alertDiscordBestDiffEnable"].as<bool>());
+    }
+    if (doc["showBlockFoundScreenEnable"].is<bool>()) {
+        Config::setShowBlockFoundEnabled(doc["showBlockFoundScreenEnable"].as<bool>());
+    }
 
     doc.clear();
 
@@ -102,13 +97,23 @@ esp_err_t POST_update_alert(httpd_req_t *req)
     // reload discord alerter config
     discordAlerter.loadConfig();
 
+    // reload config
+    SYSTEM_MODULE.loadSettings();
+
     return ESP_OK;
 }
 
 esp_err_t POST_test_alert(httpd_req_t *req)
 {
+    // close connection when out of scope
+    ConGuard g(http_server, req);
+
     if (set_cors_headers(req) != ESP_OK) {
         httpd_resp_send_500(req);
+        return ESP_FAIL;
+    }
+
+    if (validateOTP(req) != ESP_OK) {
         return ESP_FAIL;
     }
 

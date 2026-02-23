@@ -1,5 +1,6 @@
 import { eASICModel } from './enum/eASICModel';
 import { IHistory } from '../models/IHistory';
+import { IStratum } from './IStratum';
 
 export interface ISystemInfo {
 
@@ -12,16 +13,20 @@ export interface ISystemInfo {
     voltage: number,
     maxVoltage: number,
     minVoltage: number,
-    current: number,
+    current: number,  // mA (raw)
+    currentA?: number;
+    minCurrentA?: number;
+    maxCurrentA?: number;
     temp: number,
     vrTemp: number,
+    vrTempInt: number,
     hashRateTimestamp: number,
     hashRate: number,
     hashRate_10m: number,
     hashRate_1h: number,
     hashRate_1d: number,
-    bestDiff: string,
-    bestSessionDiff: string,
+    bestDiff: number,
+    bestSessionDiff: number,
     freeHeap: number,
     freeHeapInt: number,
     coreVoltage: number,
@@ -44,29 +49,37 @@ export interface ISystemInfo {
     stratumPort: number,
     stratumUser: string,
     stratumEnonceSubscribe: number,
+    stratumTLS: number,
     fallbackStratumURL: string,
     fallbackStratumPort: number,
     fallbackStratumUser: string,
     fallbackStratumEnonceSubscribe: number,
-    isUsingFallbackStratum: boolean,
-    isStratumConnected: boolean,
+    fallbackStratumTLS: number,
     stratumDifficulty: number,
     poolDifficulty: number,
     frequency: number,
     defaultFrequency: number,
     version: string,
     invertfanpolarity: number,
-    autofanpolarity: number,
     autofanspeed: number,
     fanspeed: number,
+    manualFanSpeed: number,
     fanrpm: number,
+    fanrpm2?: number,
+    fanCount?: number,
     coreVoltageActual: number,
     lastResetReason: string,
     jobInterval: number,
     lastpingrtt: number,
+    recentpingloss: number,
     stratum_keep: number,
     defaultVrFrequency?: number,
     vrFrequency: number,
+    shutdown: boolean,
+
+    stratum: IStratum,
+
+    defaultTheme: string,
 
     boardtemp1?: number,
     boardtemp2?: number,
@@ -77,5 +90,29 @@ export interface ISystemInfo {
     pidI: number,
     pidD: number,
 
+    asicTemps?: number[],
+
     history: IHistory
+
+    otp: boolean,
+}
+
+// fields swam is using
+export interface ISwarmInfo {
+    power: number,
+    voltage: number,
+    temp: number,
+    vrTemp: number,
+    bestDiff: number,
+    bestSessionDiff: number,
+    hostname: string,
+    hostip: string,
+    sharesAccepted: number,
+    sharesRejected: number,
+    uptimeSeconds: number,
+    asicCount: number,
+    ASICModel: eASICModel,
+    deviceModel: string,
+    poolDifficulty: number,
+    version: string,
 }

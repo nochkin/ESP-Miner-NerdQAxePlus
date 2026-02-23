@@ -3,12 +3,13 @@ import { RouterModule, Routes } from '@angular/router';
 
 import { PagesComponent } from './pages.component';
 import { NotFoundComponent } from '../@theme/components';
-import { HomeComponent } from './home/home.component';
+import { HomeShellComponent } from './home/home-shell.component';
 import { SettingsComponent } from './settings/settings.component';
 import { InfluxdbComponent } from './influxdb/influxdb.component';
 import { SystemComponent } from './system/system.component';
 import { SwarmComponent } from './swarm/swarm.component';
 import { AlertComponent } from './alert/alert.component';
+import { SecurityComponent } from './security/security.component';
 
 const routes: Routes = [{
   path: '',
@@ -21,7 +22,7 @@ const routes: Routes = [{
     },
     {
       path: 'home',
-      component: HomeComponent
+      component: HomeShellComponent
     },
     {
       path: 'settings',
@@ -42,6 +43,10 @@ const routes: Routes = [{
     {
       path: 'alert',
       component: AlertComponent
+    },
+    {
+      path: 'security',
+      component: SecurityComponent
     },
     {
       path: '**',

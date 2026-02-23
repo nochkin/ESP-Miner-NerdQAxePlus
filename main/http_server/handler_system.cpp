@@ -17,9 +17,14 @@ static const char *TAG = "http_system";
 
 #define VR_FREQUENCY_ENABLED
 
+uint64_t getDuplicateHWNonces();
+
 /* Simple handler for getting system handler */
 esp_err_t GET_system_info(httpd_req_t *req)
 {
+    // close connection when out of scope
+    ConGuard g(http_server, req);
+
     if (is_network_allowed(req) != ESP_OK) {
         return httpd_resp_send_err(req, HTTPD_401_UNAUTHORIZED, "Unauthorized");
     }
@@ -33,9 +38,15 @@ esp_err_t GET_system_info(httpd_req_t *req)
     }
 
     // Parse optional start_timestamp parameter
+    const uint64_t DEFAULT_HISTORY_SPAN_MS = 3600ULL * 1000ULL;
+    const uint64_t MAX_HISTORY_SPAN_MS = 3ULL * 3600ULL * 1000ULL;
+
     uint64_t start_timestamp = 0;
     uint64_t current_timestamp = 0;
+    uint32_t history_limit = 0;
     bool history_requested = false;
+    bool history_span_enabled = false;
+    uint64_t history_span_ms = DEFAULT_HISTORY_SPAN_MS;
     char query_str[128];
     if (httpd_req_get_url_query_str(req, query_str, sizeof(query_str)) == ESP_OK) {
         char param[64];
@@ -43,6 +54,24 @@ esp_err_t GET_system_info(httpd_req_t *req)
             start_timestamp = strtoull(param, NULL, 10);
             if (start_timestamp) {
                 history_requested = true;
+            }
+        }
+        if (httpd_query_key_value(query_str, "limit", param, sizeof(param)) == ESP_OK) {
+            history_limit = strtoul(param, NULL, 10);
+            if (history_limit > 1000) {
+                history_limit = 1000;
+            }
+        }
+        if (httpd_query_key_value(query_str, "experimental", param, sizeof(param)) == ESP_OK) {
+            history_span_enabled = (strtoul(param, NULL, 10) == 1);
+        }
+        if (httpd_query_key_value(query_str, "history_span", param, sizeof(param)) == ESP_OK) {
+            history_span_ms = strtoull(param, NULL, 10);
+            if (history_span_ms > MAX_HISTORY_SPAN_MS) {
+                history_span_ms = MAX_HISTORY_SPAN_MS;
+            }
+            if (history_span_ms == 0) {
+                history_span_ms = DEFAULT_HISTORY_SPAN_MS;
             }
         }
         if (httpd_query_key_value(query_str, "cur", param, sizeof(param)) == ESP_OK) {
@@ -56,6 +85,8 @@ esp_err_t GET_system_info(httpd_req_t *req)
 
     PSRAMAllocator allocator;
     JsonDocument doc(&allocator);
+
+    bool shutdown = POWER_MANAGEMENT_MODULE.isShutdown();
 
     // Get configuration strings from NVS
     char *ssid               = Config::getWifiSSID();
@@ -77,42 +108,64 @@ esp_err_t GET_system_info(httpd_req_t *req)
     doc["power"]              = POWER_MANAGEMENT_MODULE.getPower();
     doc["maxPower"]           = board->getMaxPin();
     doc["minPower"]           = board->getMinPin();
-    doc["voltage"]            = POWER_MANAGEMENT_MODULE.getVoltage();
     doc["maxVoltage"]         = board->getMaxVin();
     doc["minVoltage"]         = board->getMinVin();
-    doc["current"]            = POWER_MANAGEMENT_MODULE.getCurrent();
+    doc["current"]            = POWER_MANAGEMENT_MODULE.getCurrent();           // mA (raw)
+    doc["currentA"]           = POWER_MANAGEMENT_MODULE.getCurrent() / 1000.0f; // A (UI)
+    doc["minCurrentA"]        = board->getMinCurrentA(); // A
+    doc["maxCurrentA"]        = board->getMaxCurrentA(); // A
     doc["temp"]               = POWER_MANAGEMENT_MODULE.getChipTempMax();
     doc["vrTemp"]             = POWER_MANAGEMENT_MODULE.getVRTemp();
+    doc["vrTempInt"]          = POWER_MANAGEMENT_MODULE.getVRTempInt();
     doc["hashRateTimestamp"]  = history->getCurrentTimestamp();
-    doc["hashRate"]           = SYSTEM_MODULE.getCurrentHashrate();
-    doc["hashRate_1m"]        = history->getCurrentHashrate1m();
-    doc["hashRate_10m"]       = history->getCurrentHashrate10m();
-    doc["hashRate_1h"]        = history->getCurrentHashrate1h();
-    doc["hashRate_1d"]        = history->getCurrentHashrate1d();
-    doc["bestDiff"]           = SYSTEM_MODULE.getBestDiffString();
-    doc["bestSessionDiff"]    = SYSTEM_MODULE.getBestSessionDiffString();
+    // set hashrate values to 0 in shutdown
+    doc["hashRate"]           = !shutdown ? SYSTEM_MODULE.getCurrentHashrate() : 0.0;
+    doc["hashRate_1m"]        = !shutdown ? history->getCurrentHashrate1m()    : 0.0;
+    doc["hashRate_10m"]       = !shutdown ? history->getCurrentHashrate10m()   : 0.0;
+    doc["hashRate_1h"]        = !shutdown ? history->getCurrentHashrate1h()    : 0.0;
+    doc["hashRate_1d"]        = !shutdown ? history->getCurrentHashrate1d()    : 0.0;
     doc["coreVoltage"]        = board->getAsicVoltageMillis();
     doc["defaultCoreVoltage"] = board->getDefaultAsicVoltageMillis();
     doc["coreVoltageActual"]  = (int) (board->getVout() * 1000.0f);
-    doc["sharesAccepted"]     = SYSTEM_MODULE.getSharesAccepted();
-    doc["sharesRejected"]     = SYSTEM_MODULE.getSharesRejected();
-    doc["duplicateHWNonces"]  = SYSTEM_MODULE.getDuplicateHWNonces();
-    doc["isUsingFallbackStratum"] = STRATUM_MANAGER.isUsingFallback();
-    doc["isStratumConnected"] = STRATUM_MANAGER.isAnyConnected();
     doc["fanspeed"]           = POWER_MANAGEMENT_MODULE.getFanPerc();
-    doc["fanrpm"]             = POWER_MANAGEMENT_MODULE.getFanRPM();
+    doc["manualFanSpeed"]     = Config::getFanSpeed();
+    doc["fanrpm"]             = POWER_MANAGEMENT_MODULE.getFanRPM(0);
+    doc["fanrpm2"]            = (board->getNumFans() > 1) ? POWER_MANAGEMENT_MODULE.getFanRPM(1) : 0;
+    doc["fanCount"]           = board->getNumFans();
     doc["lastpingrtt"]        = get_last_ping_rtt();
-    doc["poolDifficulty"]     = SYSTEM_MODULE.getPoolDifficulty();
-    doc["foundBlocks"]        = SYSTEM_MODULE.getFoundBlocks();
-    doc["totalFoundBlocks"]   = SYSTEM_MODULE.getTotalFoundBlocks();
+    doc["recentpingloss"]     = get_recent_ping_loss();
+    doc["shutdown"]           = POWER_MANAGEMENT_MODULE.isShutdown();
+    doc["duplicateHWNonces"]  = getDuplicateHWNonces();
+
+    JsonObject stratum_obj = doc["stratum"].to<JsonObject>();
+
+    // kept for swarm compatibility
+    doc["poolDifficulty"]     = STRATUM_MANAGER->getPoolDifficulty();
+    doc["foundBlocks"]        = STRATUM_MANAGER->getFoundBlocks();
+    doc["totalFoundBlocks"]   = STRATUM_MANAGER->getTotalFoundBlocks();
+    doc["sharesAccepted"]     = STRATUM_MANAGER->getSharesAccepted();
+    doc["sharesRejected"]     = STRATUM_MANAGER->getSharesRejected();
+    doc["bestDiff"]           = STRATUM_MANAGER->getBestDiff();
+    doc["bestSessionDiff"]    = STRATUM_MANAGER->getBestSessionDiff();
+
+    STRATUM_MANAGER->getManagerInfoJson(stratum_obj);
+
+    // asic temps
+    {
+        JsonArray arr = doc["asicTemps"].to<JsonArray>();
+        for (int i=0;i<board->getAsicCount();i++) {
+            arr.add(board->getChipTemp(i));
+        }
+    }
 
     // If history was requested, add the history data as a nested object
-    if (history_requested) {
-        uint64_t end_timestamp = start_timestamp + 3600 * 1000ULL; // 1 hour later
+    if (!shutdown && history_requested) {
+        uint64_t span = history_span_enabled ? history_span_ms : DEFAULT_HISTORY_SPAN_MS;
+        uint64_t end_timestamp = start_timestamp + span;
         JsonObject json_history = doc["history"].to<JsonObject>();
 
         History *history = SYSTEM_MODULE.getHistory();
-        history->exportHistoryData(json_history, start_timestamp, end_timestamp, current_timestamp);
+        history->exportHistoryData(json_history, start_timestamp, end_timestamp, current_timestamp, history_limit);
     }
 
     // settings
@@ -128,10 +181,12 @@ esp_err_t GET_system_info(httpd_req_t *req)
     doc["stratumPort"]        = Config::getStratumPortNumber();
     doc["stratumUser"]        = stratumUser;
     doc["stratumEnonceSubscribe"] = Config::isStratumEnonceSubscribe();
+    doc["stratumTLS"]         = Config::isStratumTLS();
     doc["fallbackStratumURL"] = fallbackStratumURL;
     doc["fallbackStratumPort"]= Config::getStratumFallbackPortNumber();
     doc["fallbackStratumUser"] = fallbackStratumUser;
     doc["fallbackStratumEnonceSubscribe"] = Config::isStratumFallbackEnonceSubscribe();
+    doc["fallbackStratumTLS"] = Config::isStratumFallbackTLS();
     doc["voltage"]            = POWER_MANAGEMENT_MODULE.getVoltage();
     doc["frequency"]          = board->getAsicFrequency();
     doc["defaultFrequency"]   = board->getDefaultAsicFrequency();
@@ -142,13 +197,13 @@ esp_err_t GET_system_info(httpd_req_t *req)
     doc["invertscreen"]       = Config::isInvertScreenEnabled() ? 1 : 0; // unused?
     doc["autoscreenoff"]      = Config::isAutoScreenOffEnabled() ? 1 : 0;
     doc["invertfanpolarity"]  = board->isInvertFanPolarityEnabled() ? 1 : 0;
-    doc["autofanpolarity"]  = board->isAutoFanPolarityEnabled() ? 1 : 0;
     doc["autofanspeed"]       = Config::getTempControlMode();
     doc["stratum_keep"]       = Config::isStratumKeepaliveEnabled() ? 1 : 0;
 #ifdef VR_FREQUENCY_ENABLED
     doc["vrFrequency"]        = board->getVrFrequency();
     doc["defaultVrFrequency"] = board->getDefaultVrFrequency();
 #endif
+    doc["otp"]                = Config::isOTPEnabled(); // flag if otp is enabled
 
     // system screen
     doc["ASICModel"]          = board->getAsicModel();
@@ -160,10 +215,9 @@ esp_err_t GET_system_info(httpd_req_t *req)
     doc["version"]            = esp_app_get_description()->version;
     doc["runningPartition"]   = esp_ota_get_running_partition()->label;
 
-    //ESP_LOGI(TAG, "allocs: %d, deallocs: %d, reallocs: %d", allocs, deallocs, reallocs);
+    doc["defaultTheme"]       = board->getDefaultTheme();
 
-    // close connection to prevent clogging
-    httpd_resp_set_hdr(req, "Connection", "close");
+    //ESP_LOGI(TAG, "allocs: %d, deallocs: %d, reallocs: %d", allocs, deallocs, reallocs);
 
     // Serialize the JSON document to a String and send it
     esp_err_t ret = sendJsonResponse(req, doc);
@@ -184,6 +238,9 @@ esp_err_t GET_system_info(httpd_req_t *req)
 
 esp_err_t PATCH_update_settings(httpd_req_t *req)
 {
+    // close connection when out of scope
+    ConGuard g(http_server, req);
+
     if (is_network_allowed(req) != ESP_OK) {
         return httpd_resp_send_err(req, HTTPD_401_UNAUTHORIZED, "Unauthorized");
     }
@@ -194,68 +251,18 @@ esp_err_t PATCH_update_settings(httpd_req_t *req)
         return ESP_FAIL;
     }
 
-    int total_len = req->content_len;
-    int cur_len = 0;
-    char *buf = ((rest_server_context_t *) (req->user_ctx))->scratch;
-    int received = 0;
-    if (total_len >= SCRATCH_BUFSIZE) {
-        /* Respond with 500 Internal Server Error */
-        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "content too long");
+    if (validateOTP(req) != ESP_OK) {
         return ESP_FAIL;
     }
-    while (cur_len < total_len) {
-        received = httpd_req_recv(req, buf + cur_len, total_len);
-        if (received <= 0) {
-            /* Respond with 500 Internal Server Error */
-            httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Failed to post control value");
-            return ESP_FAIL;
-        }
-        cur_len += received;
-    }
-    buf[total_len] = '\0';
 
     PSRAMAllocator allocator;
     JsonDocument doc(&allocator);
 
-    // Parse the JSON payload
-    DeserializationError error = deserializeJson(doc, buf);
-    if (error) {
-        ESP_LOGE(TAG, "JSON parsing failed: %s", error.c_str());
-        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Invalid JSON");
-        return ESP_FAIL;
+    esp_err_t err = getJsonData(req, doc);
+    if (err != ESP_OK) {
+        return err;
     }
 
-    // Update settings if each key exists in the JSON object.
-    if (doc["stratumURL"].is<const char*>()) {
-        Config::setStratumURL(doc["stratumURL"].as<const char*>());
-    }
-    if (doc["stratumUser"].is<const char*>()) {
-        Config::setStratumUser(doc["stratumUser"].as<const char*>());
-    }
-    if (doc["stratumPassword"].is<const char*>()) {
-        Config::setStratumPass(doc["stratumPassword"].as<const char*>());
-    }
-    if (doc["stratumPort"].is<uint16_t>()) {
-        Config::setStratumPortNumber(doc["stratumPort"].as<uint16_t>());
-    }
-    if (doc["stratumEnonceSubscribe"].is<bool>()) {
-        Config::setStratumEnonceSubscribe(doc["stratumEnonceSubscribe"].as<bool>());
-    }
-    if (doc["fallbackStratumURL"].is<const char*>()) {
-        Config::setStratumFallbackURL(doc["fallbackStratumURL"].as<const char*>());
-    }
-    if (doc["fallbackStratumUser"].is<const char*>()) {
-        Config::setStratumFallbackUser(doc["fallbackStratumUser"].as<const char*>());
-    }
-    if (doc["fallbackStratumPassword"].is<const char*>()) {
-        Config::setStratumFallbackPass(doc["fallbackStratumPassword"].as<const char*>());
-    }
-    if (doc["fallbackStratumPort"].is<uint16_t>()) {
-        Config::setStratumFallbackPortNumber(doc["fallbackStratumPort"].as<uint16_t>());
-    }
-    if (doc["fallbackStratumEnonceSubscribe"].is<bool>()) {
-        Config::setStratumFallbackEnonceSubscribe(doc["fallbackStratumEnonceSubscribe"].as<bool>());
-    }
     if (doc["ssid"].is<const char*>()) {
         Config::setWifiSSID(doc["ssid"].as<const char*>());
     }
@@ -296,16 +303,13 @@ esp_err_t PATCH_update_settings(httpd_req_t *req)
         Config::setInvertScreen(doc["invertscreen"].as<bool>());
     }
     if (doc["invertfanpolarity"].is<bool>()) {
-        Config::setInvertFanPolarity(doc["invertfanpolarity"].as<bool>());
-    }
-    if (doc["autofanpolarity"].is<bool>()) {
-        Config::setAutoFanPolarity(doc["autofanpolarity"].as<bool>());
+        Config::setFanPolarity(doc["invertfanpolarity"].as<bool>());
     }
     if (doc["autofanspeed"].is<uint16_t>()) {
         Config::setTempControlMode(doc["autofanspeed"].as<uint16_t>());
     }
-    if (doc["fanspeed"].is<uint16_t>()) {
-        Config::setFanSpeed(doc["fanspeed"].as<uint16_t>());
+    if (doc["manualFanSpeed"].is<uint16_t>()) {
+        Config::setFanSpeed(doc["manualFanSpeed"].as<uint16_t>());
     }
     if (doc["autoscreenoff"].is<bool>()) {
         Config::setAutoScreenOff(doc["autoscreenoff"].as<bool>());
@@ -332,6 +336,10 @@ esp_err_t PATCH_update_settings(httpd_req_t *req)
         Config::setVrFrequency(doc["vrFrequency"].as<uint32_t>());
     }
 #endif
+
+    // save stratum settings
+    STRATUM_MANAGER->saveSettings(doc);
+
     doc.clear();
 
     // Signal the end of the response
@@ -341,11 +349,20 @@ esp_err_t PATCH_update_settings(httpd_req_t *req)
     Board* board = SYSTEM_MODULE.getBoard();
     board->loadSettings();
 
+    // reload settings of system module (and display)
+    SYSTEM_MODULE.loadSettings();
+
+    // reload settings, trigger reconnect if stratum config changed
+    STRATUM_MANAGER->loadSettings();
+
     return ESP_OK;
 }
 
 esp_err_t GET_system_asic(httpd_req_t *req)
 {
+    // close connection when out of scope
+    ConGuard g(http_server, req);
+
     if (is_network_allowed(req) != ESP_OK) {
         return httpd_resp_send_err(req, HTTPD_401_UNAUTHORIZED, "Unauthorized");
     }
@@ -371,8 +388,10 @@ esp_err_t GET_system_asic(httpd_req_t *req)
     doc["defaultVoltage"]   = board->getDefaultAsicVoltageMillis();
     doc["absMaxFrequency"]  = board->getAbsMaxAsicFrequency();
     doc["absMaxVoltage"]    = board->getAbsMaxAsicVoltageMillis();
+    doc["ecoFrequency"]     = board->getEcoAsicFrequency();
+    doc["ecoVoltage"]       = board->getEcoAsicVoltageMillis();
 
-    doc["swarmColor"] = board->getSwarmColorName();
+    doc["swarmColor"]       = board->getSwarmColorName();
 
     // frequencyOptions
     {
@@ -387,9 +406,6 @@ esp_err_t GET_system_asic(httpd_req_t *req)
         const auto& volts = board->getVoltageOptions();
         for (uint32_t v : volts) { arr.add(v); }
     }
-
-    // Verbindung schließen, damit nichts „hängt“
-    httpd_resp_set_hdr(req, "Connection", "close");
 
     esp_err_t ret = sendJsonResponse(req, doc);
     doc.clear();

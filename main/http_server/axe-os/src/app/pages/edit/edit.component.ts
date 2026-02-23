@@ -1,12 +1,16 @@
 import { HttpErrorResponse } from '@angular/common/http';
 import { Component, Input, OnInit, TemplateRef } from '@angular/core';
 import { FormBuilder, FormGroup, Validators } from '@angular/forms';
-import { forkJoin, startWith, catchError, of } from 'rxjs';
+import { switchMap, forkJoin, startWith, tap, catchError, of } from 'rxjs';
 import { LoadingService } from '../../services/loading.service';
 import { SystemService } from '../../services/system.service';
 import { eASICModel } from '../../models/enum/eASICModel';
 import { NbToastrService, NbDialogService, NbDialogRef } from '@nebular/theme';
 import { LocalStorageService } from 'src/app/services/local-storage.service';
+import { ExperimentalDashboardService } from 'src/app/services/experimental-dashboard.service';
+import { OtpAuthService, EnsureOtpResult, EnsureOtpOptions } from '../../services/otp-auth.service';
+import { TranslateService } from '@ngx-translate/core';
+import { IStratum } from 'src/app/models/IStratum';
 
 enum SupportLevel { Safe = 0, Advanced = 1, Pro = 2 }
 
@@ -37,30 +41,30 @@ export class EditComponent implements OnInit {
   public defaultCoreVoltage: number = 0;
   public defaultVrFrequency: number = 0;
 
+  public ecoFrequency: number = 0;
+  public ecoCoreVoltage: number = 0;
+
   private originalSettings!: any;
 
-  // NEW: the “raw” options from the /asic endpoint
+  public otpEnabled = false;
+  private pendingTotp: string | undefined;
+
   private asicFrequencyValues: number[] = [];
   private asicVoltageValues: number[] = [];
+
+  private stratum: IStratum = null;
 
   private rebootRequiredFields = new Set<string>([
     'flipscreen',
     'invertscreen',
-    'autoscreenoff',
     'hostname',
     'ssid',
     'wifiPass',
     'wifiStatus',
-    'stratumURL',
-    'stratumPort',
-    'stratumUser',
-    'fallbackStratumURL',
-    'fallbackStratumPort',
-    'fallbackStratumUser',
     'invertfanpolarity',
-    'autofanpolarity',
     'stratumDifficulty',
     'stratum_keep',
+    'poolMode',
   ]);
 
   @Input() uri = '';
@@ -71,138 +75,171 @@ export class EditComponent implements OnInit {
     private toastrService: NbToastrService,
     private loadingService: LoadingService,
     private localStorageService: LocalStorageService,
-    private dialogService: NbDialogService
+    private experimentalDashboard: ExperimentalDashboardService,
+    private dialogService: NbDialogService,
+    private otpAuth: OtpAuthService,
+    private translate: TranslateService,
   ) { }
 
   ngOnInit(): void {
     forkJoin({
-      info: this.systemService.getInfo(0, this.uri),
+      info: this.systemService.getInfo(0, 0, this.uri),
       asic: this.systemService.getAsicInfo(this.uri)
     })
-    .pipe(this.loadingService.lockUIUntilComplete())
-    .subscribe(({ info, asic }) => {
-      this.originalSettings = structuredClone(info);
+      .pipe(this.loadingService.lockUIUntilComplete())
+      .subscribe(({ info, asic }) => {
+        this.originalSettings = structuredClone(info);
 
-      // Model still from /info (enum-typed)
-      this.ASICModel = info.ASICModel;
+        // nasty work around
+        this.originalSettings["poolMode"] = info.stratum?.poolMode ?? 0;
 
-      // Prefer defaults from /asic, otherwise fallback to /info
-      this.defaultFrequency    = (asic?.defaultFrequency ?? info.defaultFrequency ?? 0);
-      this.defaultCoreVoltage  = (asic?.defaultVoltage   ?? info.defaultCoreVoltage ?? 0);
+        this.otpEnabled = !!info.otp;
 
-      // Store raw options (can be empty if the endpoint returns nothing)
-      this.asicFrequencyValues = asic?.frequencyOptions ?? [];
-      this.asicVoltageValues   = asic?.voltageOptions   ?? [];
+        // Model still from /info (enum-typed)
+        this.ASICModel = info.ASICModel;
 
-      this.defaultVrFrequency = info.defaultVrFrequency ?? undefined;
+        // Prefer defaults from /asic, otherwise fallback to /info
+        this.defaultFrequency = (asic?.defaultFrequency ?? info.defaultFrequency ?? 0);
+        this.defaultCoreVoltage = (asic?.defaultVoltage ?? info.defaultCoreVoltage ?? 0);
 
-      // Dropdown base lists incl. (default) label
-      const freqBase = this.asicFrequencyValues.map(v => ({
-        name: v === this.defaultFrequency ? `${v} (default)` : `${v}`,
-        value: v
-      }));
-      const voltBase = this.asicVoltageValues.map(v => ({
-        name: v === this.defaultCoreVoltage ? `${v} (default)` : `${v}`,
-        value: v
-      }));
+        // eco only from /asic (optional)
+        this.ecoFrequency = asic?.ecoFrequency ?? undefined;
+        this.ecoCoreVoltage = asic?.ecoVoltage ?? undefined;
 
-      // Build dropdowns and, if needed, append the current custom value
-      this.frequencyOptions = this.assembleDropdownOptions(freqBase, info.frequency);
-      this.voltageOptions   = this.assembleDropdownOptions(voltBase,  info.coreVoltage);
+        // Store raw options (can be empty if the endpoint returns nothing)
+        this.asicFrequencyValues = asic?.frequencyOptions ?? [];
+        this.asicVoltageValues = asic?.voltageOptions ?? [];
 
-      // fix setting where we allowed to disable temp shutdown
-      if (info.overheat_temp == 0) {
-        info.overheat_temp = 70;
-      }
-      // respect bounds
-      info.overheat_temp = Math.max(40, Math.min(90, info.overheat_temp));
+        this.defaultVrFrequency = info.defaultVrFrequency ?? undefined;
 
-      // Build the form (Min/Max for volt/freq will be set dynamically right after)
-      this.form = this.fb.group({
-        stratum_keep: [info.stratum_keep == 1],
-        flipscreen: [info.flipscreen == 1],
-        invertscreen: [info.invertscreen == 1],
-        autoscreenoff: [info.autoscreenoff == 1],
-        timeFormat: [this.localStorageService.getItem('timeFormat') || '24h'],
-        stratumURL: [info.stratumURL, [
-          Validators.required,
-          Validators.pattern(/^(?!.*stratum\+tcp:\/\/).*$/),
-          Validators.pattern(/^[^:]*$/),
-        ]],
-        stratumPort: [info.stratumPort, [
-          Validators.required,
-          Validators.pattern(/^[^:]*$/),
-          Validators.min(0),
-          Validators.max(65353)
-        ]],
-        stratumUser: [info.stratumUser, [Validators.required]],
-        stratumPassword: ['*****', [Validators.required]],
-        stratumEnonceSubscribe: [info.stratumEnonceSubscribe == 1],
+        const freqBase = this.asicFrequencyValues.map(v => {
+          let suffix = '';
+          if (v === this.defaultFrequency) suffix = ' (default)';
+          if (this.ecoFrequency != null && v === this.ecoFrequency) suffix = ' (eco)';
+          return { name: `${v}${suffix}`, value: v };
+        });
 
-        fallbackStratumURL: [info.fallbackStratumURL, [
-          Validators.pattern(/^(?!.*stratum\+tcp:\/\/).*$/),
-          Validators.pattern(/^[^:]*$/),
-        ]],
-        fallbackStratumPort: [info.fallbackStratumPort, [
-          Validators.pattern(/^[^:]*$/),
-          Validators.min(0),
-          Validators.max(65353)
-        ]],
-        fallbackStratumUser: [info.fallbackStratumUser],
-        fallbackStratumPassword: ['*****'],
-        fallbackStratumEnonceSubscribe: [info.fallbackStratumEnonceSubscribe == 1],
+        const voltBase = this.asicVoltageValues.map(v => {
+          let suffix = '';
+          if (v === this.defaultCoreVoltage) suffix = ' (default)';
+          if (this.ecoCoreVoltage != null && v === this.ecoCoreVoltage) suffix = ' (eco)';
+          return { name: `${v}${suffix}`, value: v };
+        });
 
-        hostname: [info.hostname, [Validators.required]],
-        ssid: [info.ssid, [Validators.required]],
-        wifiPass: ['*****'],
+        // Build dropdowns and, if needed, append the current custom value
+        this.frequencyOptions = this.assembleDropdownOptions(freqBase, info.frequency);
+        this.voltageOptions = this.assembleDropdownOptions(voltBase, info.coreVoltage);
 
-        coreVoltage: [info.coreVoltage, [Validators.min(1005), Validators.max(1400), Validators.required]],
-        frequency: [info.frequency, [Validators.required]],
-        jobInterval: [info.jobInterval, [Validators.required]],
-        stratumDifficulty: [info.stratumDifficulty, [Validators.required, Validators.min(1)]],
-        autofanspeed: [info.autofanspeed ?? 0, [Validators.required]],
-        pidTargetTemp: [info.pidTargetTemp ?? 55, [
-          Validators.min(30),
-          Validators.max(80),
-          Validators.required
-        ]],
-        pidP: [info.pidP ?? 6, [
-          Validators.min(0),
-          Validators.max(100),
-          Validators.required
-        ]],
-        pidI: [info.pidI ?? 0.1, [
-          Validators.min(0),
-          Validators.max(10),
-          Validators.required
-        ]],
-        pidD: [info.pidD ?? 10, [
-          Validators.min(0),
-          Validators.max(100),
-          Validators.required
-        ]],
-        invertfanpolarity: [info.invertfanpolarity == 1, [Validators.required]],
-        autofanpolarity: [info.autofanpolarity == 1, [Validators.required]],
-        fanspeed: [info.fanspeed, [Validators.required]],
-        overheat_temp: [info.overheat_temp, [
-          Validators.min(40),
-          Validators.max(90),
-          Validators.required
-        ]],
-        vrFrequency: [info.vrFrequency, [
-          Validators.min(1000),
-          Validators.max(100000),
-          Validators.pattern(/^\d+$/),   // only ints
-          Validators.required,
-        ]],
+        // fix setting where we allowed to disable temp shutdown
+        if (info.overheat_temp == 0) {
+          info.overheat_temp = 70;
+        }
+        // respect bounds
+        info.overheat_temp = Math.max(40, Math.min(90, info.overheat_temp));
+
+        // Build the form (Min/Max for volt/freq will be set dynamically right after)
+        this.form = this.fb.group({
+          stratum_keep: [info.stratum_keep == 1],
+          flipscreen: [info.flipscreen == 1],
+          invertscreen: [info.invertscreen == 1],
+          autoscreenoff: [info.autoscreenoff == 1],
+          timeFormat: [this.localStorageService.getItem('timeFormat') || '24h'],
+          experimentalDashboardEnabled: [this.experimentalDashboard.enabled],
+          stratumURL: [info.stratumURL, [
+            Validators.required,
+            Validators.pattern(/^(?!.*stratum\+tcp:\/\/).*$/),
+            Validators.pattern(/^[^:]*$/),
+          ]],
+          stratumPort: [info.stratumPort, [
+            Validators.required,
+            Validators.pattern(/^[^:]*$/),
+            Validators.min(0),
+            Validators.max(65353)
+          ]],
+          stratumUser: [info.stratumUser, [Validators.required]],
+          stratumPassword: ['*****', [Validators.required]],
+          stratumEnonceSubscribe: [info.stratumEnonceSubscribe == 1],
+          stratumTLS: [info.stratumTLS == 1],
+
+          fallbackStratumURL: [info.fallbackStratumURL, [
+            Validators.pattern(/^(?!.*stratum\+tcp:\/\/).*$/),
+            Validators.pattern(/^[^:]*$/),
+          ]],
+          fallbackStratumPort: [info.fallbackStratumPort, [
+            Validators.pattern(/^[^:]*$/),
+            Validators.min(0),
+            Validators.max(65353)
+          ]],
+          fallbackStratumUser: [info.fallbackStratumUser],
+          fallbackStratumPassword: ['*****'],
+          fallbackStratumEnonceSubscribe: [info.fallbackStratumEnonceSubscribe == 1],
+          fallbackStratumTLS: [info.fallbackStratumTLS == 1],
+
+          hostname: [info.hostname, [Validators.required]],
+          ssid: [info.ssid, [Validators.required]],
+          wifiPass: ['*****'],
+
+          coreVoltage: [info.coreVoltage, [Validators.min(1005), Validators.max(1400), Validators.required]],
+          frequency: [info.frequency, [Validators.required]],
+          jobInterval: [info.jobInterval, [Validators.required]],
+          stratumDifficulty: [info.stratumDifficulty, [Validators.required, Validators.min(1)]],
+
+          poolMode: [info.stratum?.poolMode ?? 0, [Validators.required]],        // 0 = Failover, 1 = Dual
+          poolBalance: [info.stratum?.poolBalance ?? 50, [                  // Anteil PRIMARY in %
+            Validators.required,
+            Validators.min(0),
+            Validators.max(100),
+          ]],
+
+          autofanspeed: [info.autofanspeed ?? 0, [Validators.required]],
+          pidTargetTemp: [info.pidTargetTemp ?? 55, [
+            Validators.min(30),
+            Validators.max(80),
+            Validators.required
+          ]],
+          pidP: [info.pidP ?? 6, [
+            Validators.min(0),
+            Validators.max(100),
+            Validators.required
+          ]],
+          pidI: [info.pidI ?? 0.1, [
+            Validators.min(0),
+            Validators.max(10),
+            Validators.required
+          ]],
+          pidD: [info.pidD ?? 10, [
+            Validators.min(0),
+            Validators.max(100),
+            Validators.required
+          ]],
+          invertfanpolarity: [info.invertfanpolarity == 1, [Validators.required]],
+          manualFanSpeed: [info.manualFanSpeed, [Validators.required]],
+          overheat_temp: [info.overheat_temp, [
+            Validators.min(40),
+            Validators.max(90),
+            Validators.required
+          ]],
+          vrFrequency: [info.vrFrequency, [
+            Validators.min(1000),
+            Validators.max(100000),
+            Validators.pattern(/^\d+$/),   // only ints
+            Validators.required,
+          ]],
+          otpEnabled: [info.otp],
+        });
+
+        // Client-only toggle: persist immediately (no device reboot / no backend call)
+        this.form.controls['experimentalDashboardEnabled'].valueChanges
+          .subscribe((v: boolean) => this.experimentalDashboard.setEnabled(!!v));
+
+        this.stratum = info.stratum;
+
+        this.form.controls['autofanspeed'].valueChanges
+          .pipe(startWith(this.form.controls['autofanspeed'].value))
+          .subscribe(() => this.updatePIDFieldStates());
+
+        this.updatePIDFieldStates();
       });
-
-      this.form.controls['autofanspeed'].valueChanges
-        .pipe(startWith(this.form.controls['autofanspeed'].value))
-        .subscribe(() => this.updatePIDFieldStates());
-
-      this.updatePIDFieldStates();
-    });
   }
 
   private updatePIDFieldStates(): void {
@@ -211,19 +248,19 @@ export class EditComponent implements OnInit {
     const disable = (ctrl: string) => this.form.controls[ctrl]?.disable({ emitEvent: false });
 
     if (mode === 0) {
-      enable('fanspeed');
+      enable('manualFanSpeed');
       disable('pidTargetTemp');
       disable('pidP');
       disable('pidI');
       disable('pidD');
     } else if (mode === 1) {
-      disable('fanspeed');
+      disable('manualFanSpeed');
       disable('pidTargetTemp');
       disable('pidP');
       disable('pidI');
       disable('pidD');
     } else if (mode === 2) {
-      disable('fanspeed');
+      disable('manualFanSpeed');
       enable('pidTargetTemp');
       if (this.supportLevel >= 1) {
         enable('pidP');
@@ -237,39 +274,33 @@ export class EditComponent implements OnInit {
     }
   }
 
-  public updateSystem() {
+  public updateSystem(totp?: string) {
     const form = this.form.getRawValue();
 
-    // Save client-side preferences to localStorage
+    // Client-only preference
     if (form.timeFormat) {
       this.localStorageService.setItem('timeFormat', form.timeFormat);
-      // Emit custom event to notify other components
       window.dispatchEvent(new CustomEvent('timeFormatChanged', { detail: form.timeFormat }));
-      delete form.timeFormat; // Don't send to server
+      delete form.timeFormat;
+    }
+    // experimentalDashboardEnabled is a client-only preference; never send to backend
+    if ('experimentalDashboardEnabled' in form) {
+      delete form.experimentalDashboardEnabled;
     }
 
-    // Allow an empty wifi password
+    // Allow empty WiFi password; strip masked fields
     form.wifiPass = form.wifiPass == null ? '' : form.wifiPass;
-
-    if (form.wifiPass === '*****') {
-      delete form.wifiPass;
-    }
-    if (form.stratumPassword === '*****') {
-      delete form.stratumPassword;
-    }
+    if (form.wifiPass === '*****') delete form.wifiPass;
+    if (form.stratumPassword === '*****') delete form.stratumPassword;
+    if (form.fallbackStratumPassword === '*****') delete form.fallbackStratumPassword;
 
     form.stratum_keep = form.stratum_keep ? 1 : 0;
 
-    this.systemService.updateSystem(this.uri, form)
-      .pipe(this.loadingService.lockUIUntilComplete())
-      .subscribe({
-        next: () => {
-          this.toastrService.success('Success!', 'Saved.');
-        },
-        error: (err: HttpErrorResponse) => {
-          this.toastrService.danger('Error.', `Could not save. ${err.message}`);
-        }
-      });
+    if (this.pendingTotp) {
+      form.totp = this.pendingTotp;
+    }
+
+    return this.systemService.updateSystem(this.uri, form, totp)
   }
 
   get requiresReboot(): boolean {
@@ -291,7 +322,7 @@ export class EditComponent implements OnInit {
       }
 
       if (currentValue !== originalValue) {
-        console.log(`Mismatch on key: ${key}`, currentValue, originalValue);
+        //console.log(`Mismatch on key: ${key}`, currentValue, originalValue);
         return true;
       }
     }
@@ -325,17 +356,22 @@ export class EditComponent implements OnInit {
     this.supportLevel = supportLevel;
     console.log('Advanced Mode:', supportLevel);
 
-    const freqBase = this.asicFrequencyValues.map(v => ({
-      name: v === this.defaultFrequency ? `${v} (default)` : `${v}`,
-      value: v
-    }));
-    const voltBase = this.asicVoltageValues.map(v => ({
-      name: v === this.defaultCoreVoltage ? `${v} (default)` : `${v}`,
-      value: v
-    }));
+    const freqBase = this.asicFrequencyValues.map(v => {
+      let suffix = '';
+      if (v === this.defaultFrequency) suffix = ' (default)';
+      if (this.ecoFrequency != null && v === this.ecoFrequency) suffix = ' (eco)';
+      return { name: `${v}${suffix}`, value: v };
+    });
+
+    const voltBase = this.asicVoltageValues.map(v => {
+      let suffix = '';
+      if (v === this.defaultCoreVoltage) suffix = ' (default)';
+      if (this.ecoCoreVoltage != null && v === this.ecoCoreVoltage) suffix = ' (eco)';
+      return { name: `${v}${suffix}`, value: v };
+    });
 
     this.frequencyOptions = this.assembleDropdownOptions(freqBase, this.form.controls['frequency'].value);
-    this.voltageOptions   = this.assembleDropdownOptions(voltBase,  this.form.controls['coreVoltage'].value);
+    this.voltageOptions = this.assembleDropdownOptions(voltBase, this.form.controls['coreVoltage'].value);
 
     this.updatePIDFieldStates();
   }
@@ -377,16 +413,31 @@ export class EditComponent implements OnInit {
   }
 
   public restart() {
-    this.systemService.restart().pipe(
-      catchError(error => {
-        this.toastrService.danger(`Failed to restart Device`, 'Error');
-        return of(null);
-      })
-    ).subscribe(res => {
-      if (res !== null) {
-        this.toastrService.success(`Device restarted`, 'Success');
-      }
-    });
+    this.otpAuth.ensureOtp$(
+      this.uri,
+      this.translate.instant('SECURITY.OTP_TITLE'),
+      this.translate.instant('SECURITY.OTP_HINT'),
+      { disableOtp: true },
+    )
+      .pipe(
+        switchMap(({ totp }: EnsureOtpResult) =>
+          this.systemService.restart("", totp).pipe(
+            // drop session on reboot
+            tap(() => this.otpAuth.clearSession()),
+            this.loadingService.lockUIUntilComplete()
+          )
+        ),
+        catchError((err: HttpErrorResponse) => {
+          console.log(err);
+          this.toastrService.danger(this.translate.instant('SYSTEM.RESTART_FAILED'), this.translate.instant('COMMON.ERROR'));
+          return of(null);
+        })
+      )
+      .subscribe(res => {
+        if (res !== null) {
+          this.toastrService.success(this.translate.instant('SYSTEM.RESTART_SUCCESS'), this.translate.instant('COMMON.SUCCESS'));
+        }
+      });
   }
 
   // Function to check if settings are unsafe
@@ -399,7 +450,7 @@ export class EditComponent implements OnInit {
     if (!this.localStorageService.getBool('hideUnsafeSettingsWarning') && this.hasUnsafeSettings()) {
       this.dialogRef = this.dialogService.open(dialog, { closeOnBackdropClick: false });
     } else {
-      this.updateSystem(); // Directly save if warning is disabled
+      this.runSaveWithOptionalOtp();
     }
   }
 
@@ -409,7 +460,7 @@ export class EditComponent implements OnInit {
       this.localStorageService.setBool('hideUnsafeSettingsWarning', true);
     }
     this.dialogRef.close();
-    this.updateSystem();
+    this.runSaveWithOptionalOtp();
   }
 
   get wrapAroundTime(): number {
@@ -421,4 +472,85 @@ export class EditComponent implements OnInit {
     return wrap;
   }
 
+  private runSaveWithOptionalOtp(): void {
+    this.otpAuth.ensureOtp$(
+      this.uri,
+      this.translate.instant('SECURITY.OTP_TITLE'),
+      this.translate.instant('SECURITY.OTP_HINT')
+    )
+      .pipe(
+        switchMap(({ totp }: EnsureOtpResult) =>
+          this.updateSystem(totp).pipe(this.loadingService.lockUIUntilComplete())
+        ),
+      )
+      .subscribe({
+        next: () => {
+          this.toastrService.success('Success!', 'Saved.');
+        },
+        error: (err: HttpErrorResponse) => {
+          this.toastrService.danger('Error.', `Could not save. ${err.message}`);
+        }
+      });
+  }
+
+  public poolTabHeader(i: 0 | 1) {
+    if (this.form?.get("poolMode")?.value == 0) {
+      if (i == 0) {
+        return this.translate.instant('SETTINGS.PRIMARY_STRATUM_POOL');
+      }
+      return this.translate.instant('SETTINGS.FALLBACK_STRATUM_POOL');
+    }
+    return `Pool ${i + 1}`;
+  }
+
+  public swapPools(): void {
+    if (!this.form) return;
+
+    const a = {
+      url: 'stratumURL',
+      port: 'stratumPort',
+      user: 'stratumUser',
+      pass: 'stratumPassword',
+      tls: 'stratumTLS',
+      en: 'stratumEnonceSubscribe',
+    };
+
+    const b = {
+      url: 'fallbackStratumURL',
+      port: 'fallbackStratumPort',
+      user: 'fallbackStratumUser',
+      pass: 'fallbackStratumPassword',
+      tls: 'fallbackStratumTLS',
+      en: 'fallbackStratumEnonceSubscribe',
+    };
+
+    const get = (k: string) => this.form.get(k)?.value;
+    const set = (k: string, v: any) => this.form.get(k)?.setValue(v, { emitEvent: false });
+
+    // Swap all values
+    const tmp = {
+      url: get(a.url),
+      port: get(a.port),
+      user: get(a.user),
+      pass: get(a.pass),
+      tls: get(a.tls),
+      en: get(a.en),
+    };
+
+    set(a.url, get(b.url));
+    set(a.port, get(b.port));
+    set(a.user, get(b.user));
+    set(a.pass, get(b.pass));
+    set(a.tls, get(b.tls));
+    set(a.en, get(b.en));
+
+    set(b.url, tmp.url);
+    set(b.port, tmp.port);
+    set(b.user, tmp.user);
+    set(b.pass, tmp.pass);
+    set(b.tls, tmp.tls);
+    set(b.en, tmp.en);
+  }
+
 }
+

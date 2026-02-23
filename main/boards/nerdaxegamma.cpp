@@ -31,8 +31,10 @@ NerdaxeGamma::NerdaxeGamma() : NerdAxe() {
     m_asicVoltages = {1120, 1130, 1140, 1150, 1160, 1170, 1180, 1190, 1200};
     m_defaultAsicFrequency = m_asicFrequency = 515;
     m_defaultAsicVoltageMillis = m_asicVoltageMillis = 1150;
+    // m_absMaxAsicFrequency = 750;
+    // m_absMaxAsicVoltageMillis = 1300;
     m_initVoltageMillis = 1150;
-    m_fanInvertPolarity = true;
+    m_fanInvertPolarity = false;
     m_fanPerc = 100;
     m_flipScreen = true;
     m_vr_maxTemp = TPS546_THROTTLE_TEMP; //Set max voltage regulator temp
@@ -46,9 +48,12 @@ NerdaxeGamma::NerdaxeGamma() : NerdAxe() {
     m_minPin = 5.0;
     m_maxVin = 5.5;
     m_minVin = 4.5;
+    m_minCurrentA = 0.0f;
+    m_maxCurrentA = 6.0f;
 
     m_asicMaxDifficulty = 2048;
     m_asicMinDifficulty = 512;
+    m_asicMinDifficultyDualPool = 256;
 
 #ifdef NERDAXEGAMMA
     m_theme = new ThemeNerdaxegamma();
@@ -96,6 +101,8 @@ bool NerdaxeGamma::initBoard()
 
 void NerdaxeGamma::shutdown() {
     setVoltage(0.0);
+
+    Board::shutdown();
 }
 
 bool NerdaxeGamma::initAsics() {
@@ -118,6 +125,8 @@ bool NerdaxeGamma::initAsics() {
 
     // wait 500ms
     vTaskDelay(pdMS_TO_TICKS(500));
+
+    m_isBuckInitialized = true;
 
     // release reset pin
     gpio_set_level(BM1370_RST_PIN, 1);
@@ -181,7 +190,12 @@ float NerdaxeGamma::getVin() {
 }
 
 float NerdaxeGamma::getIin() {
-    return TPS546_get_iout();
+    float vin = getVin();
+    if (!vin) {
+        return 0.0f;
+    }
+
+    return getPin() / vin;
 }
 
 float NerdaxeGamma::getPin() {

@@ -42,7 +42,9 @@ NerdAxe::NerdAxe() : Board() {
     m_asicVoltages = {1100, 1150, 1200, 1250, 1300};
     m_defaultAsicFrequency = m_asicFrequency = 485;
     m_defaultAsicVoltageMillis = m_asicVoltageMillis = 1200;
-    m_fanInvertPolarity = true;
+    // m_absMaxAsicFrequency = 650;
+    // m_absMaxAsicVoltageMillis = 1400;
+    m_fanInvertPolarity = false;
     m_fanPerc = 100;
     m_flipScreen = true;
     m_numTempSensors = 1;
@@ -56,9 +58,12 @@ NerdAxe::NerdAxe() : Board() {
     m_minPin = 5.0;
     m_maxVin = 5.5;
     m_minVin = 4.5;
+    m_minCurrentA = 0.0f;
+    m_maxCurrentA = 5.0f;
 
     m_asicMaxDifficulty = 256;
     m_asicMinDifficulty = 64;
+    m_asicMinDifficultyDualPool = 32;
 
 #ifdef NERDAXE
     m_theme = new ThemeNerdaxe();
@@ -130,6 +135,8 @@ bool NerdAxe::initBoard()
 
 void NerdAxe::shutdown() {
     setVoltage(0.0);
+
+    Board::shutdown();
 }
 
 bool NerdAxe::initAsics()
@@ -148,6 +155,8 @@ bool NerdAxe::initAsics()
 
     // wait 500ms
     vTaskDelay(pdMS_TO_TICKS(500));
+
+    m_isBuckInitialized = true;
 
     // release reset pin
     gpio_set_level(BM1366_RST_PIN, 1);
@@ -199,15 +208,17 @@ bool NerdAxe::setVoltage(float core_voltage)
     return true;
 }
 
-void NerdAxe::setFanSpeed(float perc) {
-    EMC2101_set_fan_speed(perc);
+void NerdAxe::setFanSpeedCh(int channel, float perc) {
+    if (channel == 0) {
+        EMC2101_set_fan_speed(perc);
+    }
 }
 
 void NerdAxe::setFanPolarity(bool invert) {
     EMC2101_set_fan_polarity(invert);
 }
 
-void NerdAxe::getFanSpeed(uint16_t* rpm) {
+void NerdAxe::getFanSpeedCh(int channel, uint16_t* rpm) {
     *rpm = EMC2101_get_fan_speed();
 }
 
