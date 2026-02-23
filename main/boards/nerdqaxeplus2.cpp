@@ -37,7 +37,9 @@ NerdQaxePlus2::NerdQaxePlus2() : NerdQaxePlus() {
     m_asicMinDifficulty = 512;
     m_asicMinDifficultyDualPool = 256;
 
-#ifdef NERDQAXEPLUS2
+#ifdef NERDQAXEPLUS2_35SCREEN
+    m_theme = new ThemeNerdqaxeplus2_35screen();
+#elifdef NERDQAXEPLUS2
     m_theme = new ThemeNerdqaxeplus2();
 #endif
     m_asics = new BM1370();
