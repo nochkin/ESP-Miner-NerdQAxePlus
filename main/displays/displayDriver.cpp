@@ -749,14 +749,23 @@ lv_obj_t *DisplayDriver::initTDisplayS3(void)
     esp_lcd_panel_swap_xy(panel_handle, true);
 
     Board *board = SYSTEM_MODULE.getBoard();
+#ifndef NERDQAXEPLUS2_35SCREEN
+    bool y_flip = false;
+#else
+    bool y_flip = true;
+#endif
     if (!board->isFlipScreenEnabled()) {
-        esp_lcd_panel_mirror(panel_handle, true, false);
+        esp_lcd_panel_mirror(panel_handle, true, y_flip);
     } else {
-        esp_lcd_panel_mirror(panel_handle, false, true);
+        esp_lcd_panel_mirror(panel_handle, false, !y_flip);
     }
 
     // the gap is LCD panel specific, even panels with the same driver IC, can have different gap value
+#ifndef NERDQAXEPLUS2_35SCREEN
     esp_lcd_panel_set_gap(panel_handle, 0, 35);
+#else
+    esp_lcd_panel_set_gap(panel_handle, 0, 0);
+#endif
 
     ESP_ERROR_CHECK(esp_lcd_panel_disp_on_off(panel_handle, true));
 
