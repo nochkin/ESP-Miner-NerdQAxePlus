@@ -4,8 +4,13 @@
 static const char* TAG="nerdqaxeplus2";
 
 NerdQaxePlus2::NerdQaxePlus2() : NerdQaxePlus() {
+#ifdef NERDQAXEPLUS2_35SCREEN
+    m_deviceModel = "NerdQAxe++-35Screen";
+    m_miningAgent = "NerdQAxe++";
+#elifdef NERDQAXEPLUS2
     m_deviceModel = "NerdQAxe++";
     m_miningAgent = m_deviceModel;
+#endif
     m_asicModel = "BM1370";
     m_asicCount = 4;
     m_numPhases = 3;
