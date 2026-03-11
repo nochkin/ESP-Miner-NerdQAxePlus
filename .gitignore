@@ -39,3 +39,6 @@ components/components/*
 config.bin
 config.cvs
 managed_components/*
+
+.DS_Store
+*.bin
